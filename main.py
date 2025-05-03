@@ -1,11 +1,9 @@
-from tobot import config
+import config
 from aiogram import Bot, Dispatcher
 import asyncio
-from tobot.user_logic import router
+from user_logic.routers import router
 
 
-# Вместо BOT TOKEN HERE нужно вставить токен вашего бота,
-# полученный у @BotFather
 BOT_TOKEN = config.API_TOKEN
 USER_ID = config.USER_ID
 
@@ -26,7 +24,6 @@ async def main():
 # Функция для отправки сообщения
 async def send_message_to_user():
     await bot.send_message(USER_ID, "Я в сети!")
-    print("\nБот запущен пользователем.")
 
 
 # Функция для корректного завершения программы
