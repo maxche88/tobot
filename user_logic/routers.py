@@ -4,12 +4,13 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery
-from tobot.db.database import (add_user, get_all_users, add_question, get_random_question, shuffle_options, update_total,
-                               add_answer_to_count, find_user_id, get_all_values, del_user_id, get_values_answer)
-from tobot.keyboards.keybord import kb, kb_nc, kb_r, main_kb, kb_ap, kb_prof, kb_prof2
+from db.database import (add_user, get_all_users, add_question, get_random_question, update_total,
+                         add_answer_to_count, find_user_id, get_all_values, del_user_id, del_question,
+                         get_values_answer, next_level)
+from keyboards.keybord import kb, kb_nc, kb_r, main_kb, kb_ap, kb_prof, kb_prof2, kb_next
 import logging
 
-from tobot.config import API_TOKEN
+from config import API_TOKEN
 
 
 router = Router()
@@ -52,8 +53,12 @@ class CheckAnswer(StatesGroup):
     hand_over = State()
 
 
-# USER ================================================================================================
+# Определяем набор состояний для удаления пользователя
+class DelTest(StatesGroup):
+    del_test_id = State()
 
+
+# USER ================================================================================================
 # Регистрация
 # Слушает кнопку reply_markup=kb_reg
 @router.callback_query(F.data == 'answer_reg')
@@ -103,41 +108,56 @@ async def menu(message: Message, state: FSMContext):
                              f'из четырёх вариантов. Тема QA-тестирование.\n'
                              f'Подробнее по кнопке Инфо', reply_markup=kb_menu)
     else:
-        await message.answer(f'Tobot ждёт ваших указаний...', reply_markup=kb_menu)
+        await message.answer(f'Tobot ждёт ваших действий...', reply_markup=kb_menu)
+
+
+@router.callback_query(F.data == 'next_level')
+async def next_l(query: CallbackQuery):
+    user_id = query.from_user.id
+    next_level(user_id)
+    await query.message.edit_reply_markup(reply_markup=main_kb(user_id))
 
 
 @router.callback_query(F.data == 'start_test')
 async def start_test(query: CallbackQuery, state: FSMContext):
     user_id = query.from_user.id
-    userid_bd = find_user_id(user_id)
+    user = get_all_values(user_id)
+    userid_bd = user.get('user_id')
+    user_level = user.get('level')
 
     if user_id == userid_bd:
-        question = get_random_question(user_id, "1")
-        if question is None:
+        dct_quest = get_random_question(user_id, user_level)
+
+        if dct_quest is None:
             # Обработка ситуации, когда больше нет доступных вопросов
             await query.message.answer("К сожалению, все вопросы на данном уровне сложности закончились.\n"
-                                       "Вам необходимо перейти на следующий уровень.")
-            return  # Прерывание функции, чтобы избежать дальнейших действий когда вопросов закончились
+                                       "Вам необходимо перейти на следующий уровень.", reply_markup=kb_next)
+            return  # Прерывание функции, чтобы избежать дальнейших действий когда вопросы закончилис
 
-        shuffled_options = shuffle_options(question)
+        await state.update_data(id_q=dct_quest['id'],
+                                correct_answer=dct_quest['correct_answer'],
+                                correct_id=dct_quest['correct_index'],
+                                options=dct_quest['options'],
+                                user=user_id)
 
-        await state.update_data(id_q=question.id, correct_answer=question.answer_option_1, options=shuffled_options,
-                                user=query.from_user.id)
+        await query.message.answer(f'\nВопрос {dct_quest['id']}: {dct_quest['question']}\n\n'
+                                   f'Вариант 1: {dct_quest['options'][0]}\n'
+                                   f'Вариант 2: {dct_quest['options'][1]}\n'
+                                   f'Вариант 3: {dct_quest['options'][2]}\n'
+                                   f'Вариант 4: {dct_quest['options'][3]}\n', reply_markup=kb)
 
-        await query.message.answer(f'\nВопрос {question.id}: {question.question}\n\n'
-                                   f'Вариант 1: {shuffled_options[0]}\n'
-                                   f'Вариант 2: {shuffled_options[1]}\n'
-                                   f'Вариант 3: {shuffled_options[2]}\n'
-                                   f'Вариант 4: {shuffled_options[3]}\n', reply_markup=kb)
         await state.set_state(CheckAnswer.check_answer)
+
     else:
         await query.message.answer("Зарегистрируйтесь")
 
 
-# Обработчик нажатия кнопки button_1
-@router.callback_query(CheckAnswer.check_answer, F.data == 'answer1')
+# Обработчик нажатия кнопок button
+# .startswith('answer')`: Проверяет, начинается ли эта строка с указанного текста ("answer").
+@router.callback_query(CheckAnswer.check_answer, F.data.startswith('answer'))
 async def answer_check1(query: CallbackQuery, state: FSMContext):
-    button_index = int(query.data[-1]) - 1  # Извлекаем индекс варианта ответа
+    button_index = int(query.data.split(':')[1])  # Извлекаем индекс варианта ответа из callback_data
+
     await state.update_data(answer_index=button_index)
     user_data = await state.get_data()  # Получаем данные из состояния
     user = user_data['user']
@@ -146,64 +166,9 @@ async def answer_check1(query: CallbackQuery, state: FSMContext):
     if user_data['options'][button_index] == user_data['correct_answer']:
         await query.message.answer(f'Правильно! Вы получаете +1 балл /start', reply_markup=kb_nc)
         update_total(user, 1)
-        # Добавить ответ в таблицу user
         add_answer_to_count(user, id_q)
     else:
         await query.message.answer(f'Неправильно! -1 балл. /start', reply_markup=kb_r)
-        update_total(user, -1)
-    await state.set_state(CheckAnswer.hand_over)
-
-
-# Обработчик нажатия кнопки button_2
-@router.callback_query(CheckAnswer.check_answer, F.data == 'answer2')
-async def answer_check2(query: CallbackQuery, state: FSMContext):
-    button_index = int(query.data[-1]) - 1  # Извлекаем индекс варианта ответа
-    await state.update_data(answer_index=button_index)
-    user_data = await state.get_data()  # Получаем данные из состояния
-    user = user_data['user']
-    id_q = user_data['id_q']
-    if user_data['options'][button_index] == user_data['correct_answer']:
-        await query.message.answer(f'Правильно! Вы получаете +1 балл    /start', reply_markup=kb_nc)
-        update_total(user, 1)
-        add_answer_to_count(user, id_q)
-    else:
-        await query.message.answer(f'Неправильно! -1 балл.    /start', reply_markup=kb_r)
-        update_total(user, -1)
-    await state.set_state(CheckAnswer.hand_over)
-
-
-# Обработчик нажатия кнопки button_3
-@router.callback_query(CheckAnswer.check_answer, F.data == 'answer3')
-async def answer_check3(query: CallbackQuery, state: FSMContext):
-    button_index = int(query.data[-1]) - 1  # Извлекаем индекс варианта ответа
-    await state.update_data(answer_index=button_index)
-    user_data = await state.get_data()  # Получаем данные из состояния
-    user = user_data['user']
-    id_q = user_data['id_q']
-    if user_data['options'][button_index] == user_data['correct_answer']:
-        await query.message.answer(f'Правильно! Вы получаете +1 балл    /start', reply_markup=kb_nc)
-        update_total(user, 1)
-        add_answer_to_count(user, id_q)
-    else:
-        await query.message.answer(f'Неправильно! -1 балл.    /start', reply_markup=kb_r)
-        update_total(user, -1)
-    await state.set_state(CheckAnswer.hand_over)
-
-
-# Обработчик нажатия кнопки button_4
-@router.callback_query(CheckAnswer.check_answer, F.data == 'answer4')
-async def answer_check4(query: CallbackQuery, state: FSMContext):
-    button_index = int(query.data[-1]) - 1  # Извлекаем индекс варианта ответа
-    await state.update_data(answer_index=button_index)
-    user_data = await state.get_data()  # Получаем данные из состояния
-    user = user_data['user']
-    id_q = user_data['id_q']
-    if user_data['options'][button_index] == user_data['correct_answer']:
-        await query.message.answer(f'Правильно! Вы получаете +1 балл    /start', reply_markup=kb_nc)
-        update_total(user, 1)
-        add_answer_to_count(user, id_q)
-    else:
-        await query.message.answer(f'Неправильно! -1 балл.    /start', reply_markup=kb_r)
         update_total(user, -1)
     await state.set_state(CheckAnswer.hand_over)
 
@@ -212,7 +177,7 @@ async def answer_check4(query: CallbackQuery, state: FSMContext):
 async def answer_read(query: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     data_full = get_values_answer(data['id_q'])  # Достаём ответ из бд с помощью функции get_values_answer
-    data_num = data['answer_index']
+    data_num = data['correct_id']
     data_answer = data['correct_answer']
     # Очистка текста от лишних пробелов и спецсимволов
     data_answer = re.sub(r'\s+', ' ', data_answer.strip())
@@ -227,7 +192,7 @@ async def answer_prof(query: CallbackQuery):
     if data:
         await query.message.answer(f"ID пользователя: {data['id']}\n"
                                    f"Имя пользователя: {data['username']}\n"
-                                   f"Статус: {data['status']}\n"
+                                   f"Кол-во балов: {data['total']}\n"
                                    f"Уровень знаний: {data['level']}\n"
                                    f"Правильных ответов: {data['total']}\n", reply_markup=kb_prof)
     else:
@@ -249,28 +214,25 @@ async def answer_prof(query: CallbackQuery):
 # Обработчики команд info
 @router.callback_query(F.data == 'answer_info')
 async def info(query: CallbackQuery):
-    await query.message.answer(f'Tobot — ваш проводник в мир QA-тестирования\n\n'
-                               f'Tobot — это бот, созданный специально для тех, кто хочет '
+    await query.message.answer(f'Tobot — это бот, созданный специально для тех, кто хочет '
                                f'углубить свои знания в области тестирования программного '
                                f'обеспечения. Его основной функционал заключается в '
                                f'поэтапной выдаче вопросов, направленных на проверку ваших '
-                               f'знаний в сфере QA.\n\n'
+                               f'знаний в сфере QA. Бот запоминает вопросы на которые были '
+                               f'даны правильные ответы и задаёт только те на которые '
+                               f'вы не отвечали или ответили не верно.\n\n'
                                f'Что вас ждёт?\n\n'
-                               f'- Богатая база вопросов. Все задания отобраны из авторитетных '
-                               f'источников по подготовке тестировщиков, охватывая широкий '
-                               f'спектр тем, связанных с QA.\n'
+                               f'- Богатая база вопросов. Все задания отобраны из книг и курсов '
+                               f'по подготовке тестировщиков и инженеров по автоматизации '
+                               f'тестирования на Python.\n'
                                f'- Уровневая система. Вопросы подбираются в зависимости от '
-                               f'вашего текущего уровня подготовки. Чем больше правильных '
-                               f'ответов вы дадите, тем сложнее будут следующие тесты.\n'
+                               f'вашего текущего уровня.\n'
                                f'- Накопление баллов. За каждый верный ответ вы получаете '
-                               f'очки, которые отражают вашу статистику. Достигнув '
-                               f'определенного порога, вы переходите на новый уровень, где '
+                               f'очки, которые отражают вашу статистику. Ответив правильно '
+                               f'на все вопросы данного уровня, вы переходите на новый уровень, где '
                                f'ждут ещё более интересные и сложные задачи.\n'
                                f'- Элемент неожиданности. Каждый раз вопросы генерируются '
-                               f'случайным образом, равно как и варианты ответов, что делает '
-                               f'процесс обучения более динамичным и непредсказуемым.\n\n'
-                               f'Пройдите путь от новичка до профессионала и откройте '
-                               f'для себя новые горизонты в мире QA-тестирования!')
+                               f'случайным образом.')
 
 
 @router.callback_query(F.data == 'answer_admin_panel')
@@ -279,29 +241,20 @@ async def admin_panel_command(query: CallbackQuery):
 
 
 # ADMIN ================================================================================================
-# ADD_USER
-# Команда add_user запускает набор состояния для того что бы
-# передать в каждом состоянии нужные данные
-@router.callback_query(F.data == 'add_user')
-async def start_add_user(query: CallbackQuery, state: FSMContext):
-    await query.message.reply("Пожалуйста, введите имя пользователя:")
-    await state.set_state(AddUser.wait_username)
-
-
 # Прочитать всех пользователей из базы данных
 @router.callback_query(F.data == 'read_user')
 async def read_command(query: CallbackQuery):
     users = get_all_users()
     output_message = ""
     for user in users:
-        output_message += f"Name: {user.username}, Status: {user.status}, Level: {user.level}\n"
+        output_message += f"ID: {user.id}, Name: {user.username}, Status: {user.status}, Level: {user.level}\n"
     await query.message.answer(output_message)
 
 
-# Удалить user=================================================================================================00
+# Удалить user=================================================================================================
 @router.callback_query(F.data == 'delete_user')
 async def del_command(query: CallbackQuery, state: FSMContext):
-    await query.message.reply("input_id: ")
+    await query.message.answer("input_id: ")
     await state.set_state(DelUser.del_user_id)
 
 
@@ -309,51 +262,22 @@ async def del_command(query: CallbackQuery, state: FSMContext):
 async def del2_command(message: types.Message, state: FSMContext):
     await state.update_data(userid=message.text)
     user_id = await state.get_data()
-    del_user_id(user_id['userid'])
-    await message.answer("Delete complied")
+    res = del_user_id(user_id['userid'], flag=True)  # flag=True параметр для включения в функции удаления по id
+    if res:
+        await message.answer("Пользователь удалён!")
+    else:
+        await message.answer("Пользователя с таким id не существует!")
     await state.clear()
 
 
+# ADD_QUEST ================================================================================================
 # Создать новый тестовый вопрос
-@router.message(Command('add_test'))
-async def start_add_test(message: types.Message, state: FSMContext):
-    await message.reply("Введите вопрос:")
+@router.callback_query(F.data == 'add_test')
+async def start_add_test(query: CallbackQuery, state: FSMContext):
+    await query.message.answer("Введите тестовый вопрос:")
     await state.set_state(AddTest.question)
 
 
-# Состояние для ввода имени пользователя
-@router.message(AddUser.wait_username)
-async def process_username(message: types.Message, state: FSMContext):
-    await state.update_data(username=message.text)
-    await message.answer("Теперь введите статус пользователя:")
-    await state.set_state(AddUser.wait_status)
-
-
-# Состояние для ввода статуса пользователя
-@router.message(AddUser.wait_status)
-async def process_username2(message: types.Message, state: FSMContext):
-    await state.update_data(status=message.text)
-    await message.answer(f'Теперь введите уровень пользователя\n'
-                         f'1 - Новичок:\n'
-                         f'2 - Середнячок\n')
-    await state.set_state(AddUser.wait_level)
-
-
-# Записываем данные полученые от пользователя
-@router.message(AddUser.wait_level)
-async def process_save_username(message: types.Message, state: FSMContext):
-    await state.update_data(user_id=message.from_user.id)
-    await state.update_data(level=message.text)
-
-    user_data = await state.get_data()  # Собираем все данные из контекста состояния
-    add_user(user_data)  # Передаем собранные данные в функцию add_user
-    await message.answer("Пользователь успешно добавлен!")
-    await state.clear()
-
-
-# ADD_TEST ================================================================================================
-# Добавление вопроса.
-# Добавление развёрнутого ответа
 @router.message(AddTest.question)
 async def process_question(message: types.Message, state: FSMContext):
     await state.update_data(question=message.text)
@@ -364,7 +288,7 @@ async def process_question(message: types.Message, state: FSMContext):
 @router.message(AddTest.answer)
 async def process_answer(message: types.Message, state: FSMContext):
     await state.update_data(answer=message.text)
-    await message.answer("ведите вариант ответа 1:")
+    await message.answer("Введите правильный вариант ответа 1:")
     await state.set_state(AddTest.answer_option_1)
 
 
@@ -372,7 +296,7 @@ async def process_answer(message: types.Message, state: FSMContext):
 @router.message(AddTest.answer_option_1)
 async def process_answer_option_1(message: types.Message, state: FSMContext):
     await state.update_data(answer_option_1=message.text)
-    await message.answer("Введите вариант ответа 2:")
+    await message.answer("Введите ложный вариант ответа 2:")
     await state.set_state(AddTest.answer_option_2)
 
 
@@ -380,7 +304,7 @@ async def process_answer_option_1(message: types.Message, state: FSMContext):
 @router.message(AddTest.answer_option_2)
 async def process_answer_option_2(message: types.Message, state: FSMContext):
     await state.update_data(answer_option_2=message.text)
-    await message.answer("Введите вариант ответа 3:")
+    await message.answer("Введите ложный вариант ответа 3:")
     await state.set_state(AddTest.answer_option_3)
 
 
@@ -388,7 +312,7 @@ async def process_answer_option_2(message: types.Message, state: FSMContext):
 @router.message(AddTest.answer_option_3)
 async def process_answer_option_3(message: types.Message, state: FSMContext):
     await state.update_data(answer_option_3=message.text)
-    await message.answer("Введите вариант ответа 4:")
+    await message.answer("Введите ложный вариант ответа 4:")
     await state.set_state(AddTest.answer_option_4)
 
 
@@ -408,16 +332,31 @@ async def process_answer(message: types.Message, state: FSMContext):
     await state.set_state(AddTest.difficulty_level)
 
 
-# Добавление сложности вопроса
+# Добавление вопроса в бд
 @router.message(AddTest.difficulty_level)
 async def process_save_answer(message: types.Message, state: FSMContext):
     await state.update_data(difficulty_level=message.text)
     test_data = await state.get_data()  # Собираем все данные из контекста состояния
-    add_question(test_data)  # Передаем собранные данные в функцию add_user
+    add_question(test_data)  # Передаем собранные данные в функцию add_add_question
     await message.answer("Данные успешно добавлены!")
     await state.clear()
 
 
+# DEL_QUEST ================================================================================================
+@router.callback_query(F.data == 'delete_test')
+async def del_test(query: CallbackQuery, state: FSMContext):
+    await query.message.answer("Введите id вопроса:")
+    await state.set_state(DelTest.del_test_id)
 
 
+@router.message(DelTest.del_test_id)
+async def del_test2(message: types.Message, state: FSMContext):
+    await state.update_data(del_test_id=message.text)
+    test_id = await state.get_data()
+    res = del_question(test_id['del_test_id'])
+    if res:
+        await message.answer("Тестовый вопрос удалён!")
+    else:
+        await message.answer("Тестового вопроса с таким id не существует!")
+    await state.clear()
 
